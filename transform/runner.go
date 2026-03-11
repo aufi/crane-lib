@@ -6,6 +6,7 @@ import (
 
 	jsonpatch "github.com/evanphx/json-patch"
 	ijsonpatch "github.com/konveyor/crane-lib/transform/internal/jsonpatch"
+	"github.com/konveyor/crane-lib/transform/kustomize"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -192,4 +193,105 @@ func (r *Runner) sanitizePatches(pluginOps []PluginOperation) (jsonpatch.Patch, 
 		dedupedPatch = append(dedupedPatch, p.Operation)
 	}
 	return dedupedPatch, ignoredPatches, nil
+}
+
+// RunForKustomize executes plugins and returns structured artifacts for Kustomize generation
+func (r *Runner) RunForKustomize(object unstructured.Unstructured, plugins []Plugin) (kustomize.TransformArtifact, error) {
+	artifact := kustomize.TransformArtifact{
+		Patches:             jsonpatch.Patch{},
+		IgnoredPatches:      []kustomize.IgnoredPatch{},
+		IsWhiteOut:          false,
+		WhiteOutRequestedBy: []string{},
+	}
+
+	// Derive target from object
+	target, err := kustomize.DeriveTarget(object)
+	if err != nil {
+		return artifact, err
+	}
+	artifact.Target = target
+
+	haveWhiteOut := false
+	havePatches := false
+	patches := []PluginOperation{}
+	whiteOutPlugins := []string{}
+	errs := []error{}
+
+	for _, plugin := range plugins {
+		// We want to keep the original while we run each plugin.
+		c := object.DeepCopy()
+		resp, err := plugin.Run(PluginRequest{Unstructured: *c, Extras: r.OptionalFlags})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if resp.IsWhiteOut {
+			haveWhiteOut = true
+			whiteOutPlugins = append(whiteOutPlugins, plugin.Metadata().Name)
+		}
+		if len(resp.Patches) > 0 {
+			havePatches = true
+			patches = append(patches, PluginOperationsFromPatch(plugin.Metadata().Name, resp.Patches)...)
+		}
+	}
+
+	if len(errs) > 0 {
+		return artifact, errs[0]
+	}
+
+	if haveWhiteOut {
+		artifact.IsWhiteOut = true
+		artifact.WhiteOutRequestedBy = whiteOutPlugins
+		return artifact, nil
+	}
+
+	if havePatches {
+		sanitizedPatches, ignoredPatches, err := r.sanitizePatches(patches)
+		if err != nil {
+			return artifact, err
+		}
+
+		artifact.Patches = sanitizedPatches
+
+		// Convert ignored patches to kustomize format
+		for _, ignored := range ignoredPatches {
+			path, err := ignored.Operation.Path()
+			if err != nil {
+				continue
+			}
+			artifact.IgnoredPatches = append(artifact.IgnoredPatches, kustomize.IgnoredPatch{
+				Path:           path,
+				SelectedPlugin: r.findSelectedPlugin(path, patches, ignoredPatches),
+				IgnoredPlugin:  ignored.PluginName,
+				Reason:         "path-conflict-priority",
+				Operation:      ignored.Operation,
+			})
+		}
+	}
+
+	return artifact, nil
+}
+
+// findSelectedPlugin finds which plugin was selected for a given path
+func (r *Runner) findSelectedPlugin(path string, allPatches []PluginOperation, ignoredPatches []PluginOperation) string {
+	for _, op := range allPatches {
+		opPath, err := op.Operation.Path()
+		if err != nil {
+			continue
+		}
+		if opPath == path {
+			// Check if this is not in ignored list
+			isIgnored := false
+			for _, ignored := range ignoredPatches {
+				if EqualPluginOperation(op, ignored) {
+					isIgnored = true
+					break
+				}
+			}
+			if !isIgnored {
+				return op.PluginName
+			}
+		}
+	}
+	return "unknown"
 }
