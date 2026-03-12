@@ -2,6 +2,7 @@ package kustomize
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -259,4 +260,101 @@ func GenerateIgnoredPatchesReport(artifacts []TransformArtifact) ([]byte, error)
 	}
 
 	return jsonBytes, nil
+}
+
+// GenerateStageKustomization creates a kustomization.yaml for a single stage
+// For first stage: resources point to input files
+// For subsequent stages: resources point to previous stage rendered.yaml
+func GenerateStageKustomization(artifacts []TransformArtifact, resourcePaths map[string]string, isFirstStage bool, prevStageRendered string) ([]byte, error) {
+	kustomization := KustomizationFile{
+		APIVersion: "kustomize.config.k8s.io/v1beta1",
+		Kind:       "Kustomization",
+		Resources:  []string{},
+		Patches:    []PatchConfiguration{},
+	}
+
+	// For first stage, use individual resources
+	// For subsequent stages, use previous stage's rendered output
+	if isFirstStage {
+		// Collect resources and patches (same as before)
+		resourceMap := make(map[string]bool)
+		patchList := []PatchConfiguration{}
+
+		for _, artifact := range artifacts {
+			if artifact.IsWhiteOut {
+				continue
+			}
+
+			key := fmt.Sprintf("%s/%s/%s/%s", artifact.Target.Namespace, artifact.Target.Group, artifact.Target.Kind, artifact.Target.Name)
+			resourcePath, ok := resourcePaths[key]
+			if !ok {
+				// Fallback
+				resourcePath = fmt.Sprintf("../resources/%s_%s_%s_%s.yaml",
+					artifact.Target.Group,
+					artifact.Target.Version,
+					artifact.Target.Kind,
+					artifact.Target.Name)
+			}
+
+			if !resourceMap[resourcePath] {
+				resourceMap[resourcePath] = true
+				kustomization.Resources = append(kustomization.Resources, resourcePath)
+			}
+
+			if len(artifact.Patches) > 0 {
+				patchFileName := GeneratePatchFileName(artifact.Target)
+				patchConfig := PatchConfiguration{
+					Path:   filepath.Join("patches", patchFileName),
+					Target: artifact.Target.ToTargetConfig(),
+				}
+				patchList = append(patchList, patchConfig)
+			}
+		}
+
+		sort.Strings(kustomization.Resources)
+		sort.Slice(patchList, func(i, j int) bool {
+			return patchList[i].Path < patchList[j].Path
+		})
+		kustomization.Patches = patchList
+	} else {
+		// Subsequent stages: reference previous stage rendered output
+		if prevStageRendered == "" {
+			return nil, fmt.Errorf("previous stage rendered path required for non-first stage")
+		}
+
+		// Check if previous rendered file exists
+		if _, err := os.Stat(prevStageRendered); err != nil {
+			return nil, fmt.Errorf("previous stage rendered file not found: %s", prevStageRendered)
+		}
+
+		// Single resource: the previous stage output
+		kustomization.Resources = []string{prevStageRendered}
+
+		// Add patches from this stage
+		patchList := []PatchConfiguration{}
+		for _, artifact := range artifacts {
+			if artifact.IsWhiteOut || len(artifact.Patches) == 0 {
+				continue
+			}
+
+			patchFileName := GeneratePatchFileName(artifact.Target)
+			patchConfig := PatchConfiguration{
+				Path:   filepath.Join("patches", patchFileName),
+				Target: artifact.Target.ToTargetConfig(),
+			}
+			patchList = append(patchList, patchConfig)
+		}
+
+		sort.Slice(patchList, func(i, j int) bool {
+			return patchList[i].Path < patchList[j].Path
+		})
+		kustomization.Patches = patchList
+	}
+
+	yamlBytes, err := yaml.Marshal(kustomization)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal kustomization to YAML: %w", err)
+	}
+
+	return yamlBytes, nil
 }

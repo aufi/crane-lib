@@ -84,3 +84,27 @@ type TargetConfig struct {
 	Name      string `yaml:"name"`
 	Namespace string `yaml:"namespace,omitempty"`
 }
+
+// Pipeline types for multi-stage execution
+
+// Pipeline represents the complete transform pipeline
+type Pipeline struct {
+	Stages []Stage `yaml:"stages"`
+}
+
+// Stage represents one plugin execution stage in the pipeline
+type Stage struct {
+	ID       string `yaml:"id"`
+	Plugin   string `yaml:"plugin"`
+	Priority int    `yaml:"priority"`
+	Required bool   `yaml:"required"`
+	Enabled  bool   `yaml:"enabled"`
+	Comment  string `yaml:"comment,omitempty"`
+}
+
+// StageArtifacts contains all outputs for a single stage
+type StageArtifacts struct {
+	Stage              Stage
+	ResourceArtifacts  []TransformArtifact
+	RenderedManifests  []byte // Output of kubectl kustomize for this stage
+}
