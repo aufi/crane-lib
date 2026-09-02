@@ -148,6 +148,32 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
+			Name: "EventWhiteOut",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "Event",
+					"apiVersion": "v1",
+				},
+			},
+			Response: transform.PluginResponse{
+				IsWhiteOut: true,
+				Version:    "v1",
+			},
+		},
+		{
+			Name: "EventsK8sWhiteOut",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "Event",
+					"apiVersion": "events.k8s.io/v1",
+				},
+			},
+			Response: transform.PluginResponse{
+				IsWhiteOut: true,
+				Version:    "v1",
+			},
+		},
+		{
 			Name: "NoDeploymentWhiteoutByDefault",
 			Object: &unstructured.Unstructured{
 				Object: map[string]interface{}{

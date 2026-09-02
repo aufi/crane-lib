@@ -90,6 +90,8 @@ var (
 	deploymentGK            = schema.GroupKind{Group: "apps", Kind: "Deployment"}
 	endpointGK              = schema.GroupKind{Group: "", Kind: "Endpoints"}
 	endpointSliceGK         = schema.GroupKind{Group: "discovery.k8s.io", Kind: "EndpointSlice"}
+	eventGK                 = schema.GroupKind{Group: "", Kind: "Event"}
+	eventsK8sGK             = schema.GroupKind{Group: "events.k8s.io", Kind: "Event"}
 	extensionsGroup         = "extensions"
 	jobGK                   = schema.GroupKind{Group: "batch", Kind: "Job"}
 	pvcGK                   = schema.GroupKind{Group: "", Kind: "PersistentVolumeClaim"}
@@ -114,6 +116,8 @@ var (
 var gksToWhiteout = []schema.GroupKind{
 	endpointGK,
 	endpointSliceGK,
+	eventGK,
+	eventsK8sGK,
 	pvcGK,
 	subscriptionGK,
 	installPlanGK,
