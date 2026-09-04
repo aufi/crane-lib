@@ -36,6 +36,7 @@ const (
 	StripDefaultCABundleFlag     = "strip-default-cabundle"
 	PVCRenameMap                 = "pvc-rename-map"
 	PVCStorageClassMap           = "pvc-storage-class-map"
+	WhiteoutPVCFlag              = "whiteout-pvc"
 	CraneJobIdempotentAnnotation = "crane.konveyor.io/job-idempotent"
 )
 
@@ -143,6 +144,7 @@ type KubernetesTransformPlugin struct {
 	StripDefaultCABundle bool
 	PVCRenameMap         map[string]string
 	PVCStorageClassMap   map[string]string
+	WhiteoutPVC          bool
 }
 
 func (k *KubernetesTransformPlugin) Run(request transform.PluginRequest) (transform.PluginResponse, error) {
@@ -220,6 +222,11 @@ func (k *KubernetesTransformPlugin) Metadata() transform.PluginMetadata {
 				Help:     "A comma-separated list of colon separated StorageClass replacements for PVCs and StatefulSet volumeClaimTemplates.",
 				Example:  "old-storage-class:new-storage-class,standard:fast",
 			},
+			{
+				FlagName: WhiteoutPVCFlag,
+				Help:     "Whiteout PersistentVolumeClaims instead of including them in transformed output.",
+				Example:  "true",
+			},
 		},
 	}
 }
@@ -271,6 +278,9 @@ func (k *KubernetesTransformPlugin) setOptionalFields(extras map[string]string) 
 		}
 		k.PVCStorageClassMap = storageClassMap
 	}
+	if len(extras[WhiteoutPVCFlag]) > 0 {
+		k.WhiteoutPVC, _ = strconv.ParseBool(extras[WhiteoutPVCFlag])
+	}
 	return nil
 }
 
@@ -295,6 +305,9 @@ var _ transform.Plugin = &KubernetesTransformPlugin{}
 
 func (k *KubernetesTransformPlugin) getWhiteOuts(obj unstructured.Unstructured) bool {
 	groupKind := obj.GroupVersionKind().GroupKind()
+	if k.WhiteoutPVC && groupKind == pvcGK {
+		return true
+	}
 	if len(k.IncludeOnly) > 0 {
 		if !groupKindInList(groupKind, k.IncludeOnly) {
 			return true

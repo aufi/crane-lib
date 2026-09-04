@@ -26,6 +26,7 @@ func TestRun(t *testing.T) {
 		ExtraWhiteouts       []schema.GroupKind
 		IncludeOnly          []schema.GroupKind
 		PVCStorageClassMap   map[string]string
+		WhiteoutPVC          bool
 		ShouldError          bool
 		Response             transform.PluginResponse
 		PatchResponseJson    string
@@ -106,6 +107,20 @@ func TestRun(t *testing.T) {
 			Response:           transform.PluginResponse{IsWhiteOut: false, Version: "v1"},
 			PVCStorageClassMap: map[string]string{"old-storage-class": "new-storage-class"},
 			PatchResponseJson:  `[{"op": "replace", "path": "/spec/volumeClaimTemplates/0/spec/storageClassName", "value": "new-storage-class"}]`,
+		},
+		{
+			Name: "PVCWhiteOutWhenConfigured",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "PersistentVolumeClaim",
+					"apiVersion": "v1",
+				},
+			},
+			WhiteoutPVC: true,
+			Response: transform.PluginResponse{
+				IsWhiteOut: true,
+				Version:    "v1",
+			},
 		},
 		{
 			Name: "SubscriptionWhiteOut",
@@ -1256,6 +1271,7 @@ func TestRun(t *testing.T) {
 				ExtraWhiteouts:       c.ExtraWhiteouts,
 				IncludeOnly:          c.IncludeOnly,
 				PVCStorageClassMap:   c.PVCStorageClassMap,
+				WhiteoutPVC:          c.WhiteoutPVC,
 			}
 			resp, err := p.Run(transform.PluginRequest{Unstructured: *c.Object})
 			if err != nil && !c.ShouldError {
@@ -1331,6 +1347,22 @@ func TestPVCStorageClassMapOptional(t *testing.T) {
 		})
 		if err == nil {
 			t.Fatal("expected invalid StorageClass mapping to fail")
+		}
+	})
+
+	t.Run("whiteout PVC", func(t *testing.T) {
+		plugin := &kubernetes.KubernetesTransformPlugin{}
+		response, err := plugin.Run(transform.PluginRequest{
+			Unstructured: pvc,
+			Extras: map[string]string{
+				kubernetes.WhiteoutPVCFlag: "true",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !response.IsWhiteOut {
+			t.Fatal("expected PVC to be whiteouted when whiteout-pvc is true")
 		}
 	})
 }
