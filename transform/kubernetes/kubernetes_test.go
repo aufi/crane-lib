@@ -1091,6 +1091,42 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
+			Name: "UserCreatedSATokenSecretNotWhiteOut",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "Secret",
+					"apiVersion": "v1",
+					"type":       "kubernetes.io/service-account-token",
+					"metadata": map[string]interface{}{
+						"name":      "registry-token",
+						"namespace": "myapp",
+					},
+				},
+			},
+			Response: transform.PluginResponse{
+				IsWhiteOut: false,
+				Version:    "v1",
+			},
+		},
+		{
+			Name: "UserCreatedDockercfgSecretNotWhiteOut",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "Secret",
+					"apiVersion": "v1",
+					"type":       "kubernetes.io/dockercfg",
+					"metadata": map[string]interface{}{
+						"name":      "private-registry",
+						"namespace": "myapp",
+					},
+				},
+			},
+			Response: transform.PluginResponse{
+				IsWhiteOut: false,
+				Version:    "v1",
+			},
+		},
+		{
 			Name: "OpaqueSecretNotWhiteOut",
 			Object: &unstructured.Unstructured{
 				Object: map[string]interface{}{
