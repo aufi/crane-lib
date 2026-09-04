@@ -3,6 +3,7 @@ package kubernetes
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -19,20 +20,22 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 var logger logrus.FieldLogger
 
 const (
-	AddAnnotationsFlag       = "add-annotations"
-	RemoveAnnotationsFlag    = "remove-annotations"
-	RegistryReplacementFlag  = "registry-replacement"
-	ExtraWhiteoutsFlag       = "extra-whiteouts"
-	IncludeOnlyFlag          = "include-only"
-	DisableWhiteoutOwnedFlag = "disable-whiteout-owned"
-	StripDefaultRBACFlag     = "strip-default-rbac"
-	StripDefaultCABundleFlag = "strip-default-cabundle"
-	PVCRenameMap             = "pvc-rename-map"
+	AddAnnotationsFlag           = "add-annotations"
+	RemoveAnnotationsFlag        = "remove-annotations"
+	RegistryReplacementFlag      = "registry-replacement"
+	ExtraWhiteoutsFlag           = "extra-whiteouts"
+	IncludeOnlyFlag              = "include-only"
+	DisableWhiteoutOwnedFlag     = "disable-whiteout-owned"
+	StripDefaultRBACFlag         = "strip-default-rbac"
+	StripDefaultCABundleFlag     = "strip-default-cabundle"
+	PVCRenameMap                 = "pvc-rename-map"
+	PVCStorageClassMap           = "pvc-storage-class-map"
 	CraneJobIdempotentAnnotation = "crane.konveyor.io/job-idempotent"
 )
 
@@ -60,6 +63,9 @@ const (
 	podNodeName          = "/spec/nodeName"
 	podNodeSelector      = "/spec/nodeSelector"
 	podPriority          = "/spec/priority"
+	pvcVolumeName        = "/spec/volumeName"
+	pvcFinalizers        = "/metadata/finalizers"
+	pvcStorageClassName  = "/spec/storageClassName"
 	roleBindingSubject   = "/subjects/%d/namespace"
 	updateClusterIP      = "/spec/clusterIP"
 	updateClusterIPs     = "/spec/clusterIPs"
@@ -118,7 +124,6 @@ var gksToWhiteout = []schema.GroupKind{
 	endpointSliceGK,
 	eventGK,
 	eventsK8sGK,
-	pvcGK,
 	subscriptionGK,
 	installPlanGK,
 	clusterServiceVersionGK,
@@ -137,6 +142,7 @@ type KubernetesTransformPlugin struct {
 	StripDefaultRBAC     bool
 	StripDefaultCABundle bool
 	PVCRenameMap         map[string]string
+	PVCStorageClassMap   map[string]string
 }
 
 func (k *KubernetesTransformPlugin) Run(request transform.PluginRequest) (transform.PluginResponse, error) {
@@ -209,6 +215,11 @@ func (k *KubernetesTransformPlugin) Metadata() transform.PluginMetadata {
 				Help:     "A comma-separated list of colon separated pvc renames.",
 				Example:  "old-pvc1-name:new-pvc1-name,old-pvc2-name:new-pvc2-name",
 			},
+			{
+				FlagName: PVCStorageClassMap,
+				Help:     "A comma-separated list of colon separated StorageClass replacements for PVCs and StatefulSet volumeClaimTemplates.",
+				Example:  "old-storage-class:new-storage-class,standard:fast",
+			},
 		},
 	}
 }
@@ -253,7 +264,31 @@ func (k *KubernetesTransformPlugin) setOptionalFields(extras map[string]string) 
 		}
 		k.PVCRenameMap = pvcMap
 	}
+	if len(extras[PVCStorageClassMap]) > 0 {
+		storageClassMap, err := parsePVCStorageClassMap(extras[PVCStorageClassMap])
+		if err != nil {
+			return err
+		}
+		k.PVCStorageClassMap = storageClassMap
+	}
 	return nil
+}
+
+func parsePVCStorageClassMap(value string) (map[string]string, error) {
+	storageClassMap := map[string]string{}
+	for _, pair := range strings.Split(value, ",") {
+		parts := strings.SplitN(pair, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("invalid StorageClass mapping %q: expected source:destination", pair)
+		}
+		for _, storageClass := range parts {
+			if errs := validation.IsDNS1123Subdomain(storageClass); len(errs) > 0 {
+				return nil, fmt.Errorf("invalid StorageClass name %q: %s", storageClass, strings.Join(errs, ", "))
+			}
+		}
+		storageClassMap[parts[0]] = parts[1]
+	}
+	return storageClassMap, nil
 }
 
 var _ transform.Plugin = &KubernetesTransformPlugin{}
@@ -531,6 +566,25 @@ func (k *KubernetesTransformPlugin) getKubernetesTransforms(obj unstructured.Uns
 			return nil, err
 		}
 		jsonPatch = append(jsonPatch, patches...)
+
+		patches, err = replacePVCStorageClasses(statefulSet.Spec.VolumeClaimTemplates, k.PVCStorageClassMap, "/spec/volumeClaimTemplates/%d/spec/storageClassName")
+		if err != nil {
+			return nil, err
+		}
+		jsonPatch = append(jsonPatch, patches...)
+	}
+	if pvcGK == obj.GetObjectKind().GroupVersionKind().GroupKind() {
+		patches, err := removePVCFields(obj)
+		if err != nil {
+			return nil, err
+		}
+		jsonPatch = append(jsonPatch, patches...)
+
+		patches, err = replacePVCStorageClass(obj, k.PVCStorageClassMap)
+		if err != nil {
+			return nil, err
+		}
+		jsonPatch = append(jsonPatch, patches...)
 	}
 	if serviceAccountGK == obj.GetObjectKind().GroupVersionKind().GroupKind() {
 		if _, found, _ := unstructured.NestedSlice(obj.Object, "secrets"); found {
@@ -639,6 +693,85 @@ func stripFields(obj unstructured.Unstructured) (jsonpatch.Patch, error) {
 			}
 			patches = append(patches, patch...)
 		}
+	}
+	return patches, nil
+}
+
+func removePVCFields(obj unstructured.Unstructured) (jsonpatch.Patch, error) {
+	var patches jsonpatch.Patch
+	for _, path := range [][]string{{"spec", "volumeName"}, {"metadata", "finalizers"}} {
+		if _, found, err := unstructured.NestedFieldNoCopy(obj.Object, path...); err != nil {
+			return nil, err
+		} else if found {
+			patch, err := jsonpatch.DecodePatch([]byte(fmt.Sprintf(opRemove, "/"+strings.Join(path, "/"))))
+			if err != nil {
+				return nil, err
+			}
+			patches = append(patches, patch...)
+		}
+	}
+
+	annotations, found, err := unstructured.NestedStringMap(obj.Object, "metadata", "annotations")
+	if err != nil || !found {
+		return patches, err
+	}
+	keys := make([]string, 0, len(annotations))
+	for key := range annotations {
+		if isServerManagedPVCAnnotation(key) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		patch, err := jsonpatch.DecodePatch([]byte(fmt.Sprintf(opRemove, "/metadata/annotations/"+escapeJSONPointer(key))))
+		if err != nil {
+			return nil, err
+		}
+		patches = append(patches, patch...)
+	}
+	return patches, nil
+}
+
+func isServerManagedPVCAnnotation(key string) bool {
+	for _, prefix := range []string{
+		"pv.kubernetes.io/",
+		"volume.kubernetes.io/",
+		"volume.beta.kubernetes.io/",
+	} {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func replacePVCStorageClass(obj unstructured.Unstructured, storageClassMap map[string]string) (jsonpatch.Patch, error) {
+	storageClass, found, err := unstructured.NestedString(obj.Object, "spec", "storageClassName")
+	if err != nil || !found {
+		return nil, err
+	}
+	replacement, ok := storageClassMap[storageClass]
+	if !ok {
+		return nil, nil
+	}
+	return jsonpatch.DecodePatch([]byte(fmt.Sprintf(opReplace, pvcStorageClassName, replacement)))
+}
+
+func replacePVCStorageClasses(volumes []v1.PersistentVolumeClaim, storageClassMap map[string]string, path string) (jsonpatch.Patch, error) {
+	var patches jsonpatch.Patch
+	for i, volume := range volumes {
+		if volume.Spec.StorageClassName == nil {
+			continue
+		}
+		replacement, ok := storageClassMap[*volume.Spec.StorageClassName]
+		if !ok {
+			continue
+		}
+		patch, err := jsonpatch.DecodePatch([]byte(fmt.Sprintf(opReplace, fmt.Sprintf(path, i), replacement)))
+		if err != nil {
+			return nil, err
+		}
+		patches = append(patches, patch...)
 	}
 	return patches, nil
 }

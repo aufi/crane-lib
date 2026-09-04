@@ -25,6 +25,7 @@ func TestRun(t *testing.T) {
 		RemoveAnnotations    []string
 		ExtraWhiteouts       []schema.GroupKind
 		IncludeOnly          []schema.GroupKind
+		PVCStorageClassMap   map[string]string
 		ShouldError          bool
 		Response             transform.PluginResponse
 		PatchResponseJson    string
@@ -57,17 +58,54 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			Name: "PVCWhiteOut",
+			Name: "PVCFieldsCleanedAndStorageClassMapped",
 			Object: &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"kind":       "PersistentVolumeClaim",
 					"apiVersion": "v1",
+					"metadata": map[string]interface{}{
+						"finalizers": []interface{}{"kubernetes.io/pvc-protection"},
+						"annotations": map[string]interface{}{
+							"pv.kubernetes.io/bind-completed":               "yes",
+							"volume.beta.kubernetes.io/storage-provisioner": "old-provisioner",
+							"volume.kubernetes.io/selected-node":            "source-node",
+							"keep":                                          "value",
+						},
+					},
+					"spec": map[string]interface{}{
+						"accessModes":      []interface{}{"ReadWriteOnce"},
+						"storageClassName": "old-storage-class",
+						"volumeMode":       "Filesystem",
+						"volumeName":       "pvc-source-id",
+					},
 				},
 			},
 			Response: transform.PluginResponse{
-				IsWhiteOut: true,
+				IsWhiteOut: false,
 				Version:    "v1",
 			},
+			PVCStorageClassMap: map[string]string{"old-storage-class": "new-storage-class"},
+			PatchResponseJson:  `[{"op": "remove", "path": "/spec/volumeName"},{"op": "remove", "path": "/metadata/finalizers"},{"op": "remove", "path": "/metadata/annotations/pv.kubernetes.io~1bind-completed"},{"op": "remove", "path": "/metadata/annotations/volume.beta.kubernetes.io~1storage-provisioner"},{"op": "remove", "path": "/metadata/annotations/volume.kubernetes.io~1selected-node"},{"op": "replace", "path": "/spec/storageClassName", "value": "new-storage-class"}]`,
+		},
+		{
+			Name: "StatefulSetVolumeClaimTemplateStorageClassMapped",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "StatefulSet",
+					"apiVersion": "apps/v1",
+					"spec": map[string]interface{}{
+						"volumeClaimTemplates": []interface{}{
+							map[string]interface{}{
+								"metadata": map[string]interface{}{"name": "data"},
+								"spec":     map[string]interface{}{"storageClassName": "old-storage-class"},
+							},
+						},
+					},
+				},
+			},
+			Response:           transform.PluginResponse{IsWhiteOut: false, Version: "v1"},
+			PVCStorageClassMap: map[string]string{"old-storage-class": "new-storage-class"},
+			PatchResponseJson:  `[{"op": "replace", "path": "/spec/volumeClaimTemplates/0/spec/storageClassName", "value": "new-storage-class"}]`,
 		},
 		{
 			Name: "SubscriptionWhiteOut",
@@ -1217,6 +1255,7 @@ func TestRun(t *testing.T) {
 				DisableWhiteoutOwned: c.DisableWhiteoutOwned,
 				ExtraWhiteouts:       c.ExtraWhiteouts,
 				IncludeOnly:          c.IncludeOnly,
+				PVCStorageClassMap:   c.PVCStorageClassMap,
 			}
 			resp, err := p.Run(transform.PluginRequest{Unstructured: *c.Object})
 			if err != nil && !c.ShouldError {
@@ -1251,4 +1290,47 @@ func TestRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPVCStorageClassMapOptional(t *testing.T) {
+	pvc := unstructured.Unstructured{Object: map[string]interface{}{
+		"kind":       "PersistentVolumeClaim",
+		"apiVersion": "v1",
+		"spec": map[string]interface{}{
+			"storageClassName": "old-storage-class",
+		},
+	}}
+
+	t.Run("valid mapping", func(t *testing.T) {
+		plugin := &kubernetes.KubernetesTransformPlugin{}
+		response, err := plugin.Run(transform.PluginRequest{
+			Unstructured: pvc,
+			Extras: map[string]string{
+				kubernetes.PVCStorageClassMap: "old-storage-class:new-storage-class",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected, err := jsonpatch.DecodePatch([]byte(`[{"op":"replace","path":"/spec/storageClassName","value":"new-storage-class"}]`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if equal, err := internaljsonpatch.Equal(response.Patches, expected); err != nil || !equal {
+			t.Fatalf("unexpected patches: %v", response.Patches)
+		}
+	})
+
+	t.Run("invalid mapping", func(t *testing.T) {
+		plugin := &kubernetes.KubernetesTransformPlugin{}
+		_, err := plugin.Run(transform.PluginRequest{
+			Unstructured: pvc,
+			Extras: map[string]string{
+				kubernetes.PVCStorageClassMap: "invalid",
+			},
+		})
+		if err == nil {
+			t.Fatal("expected invalid StorageClass mapping to fail")
+		}
+	})
 }
