@@ -587,6 +587,18 @@ func (k *KubernetesTransformPlugin) getKubernetesTransforms(obj unstructured.Uns
 		jsonPatch = append(jsonPatch, patches...)
 	}
 	if pvcGK == obj.GetObjectKind().GroupVersionKind().GroupKind() {
+		volumeMode, found, err := unstructured.NestedString(obj.Object, "spec", "volumeMode")
+		if err != nil {
+			return nil, err
+		}
+		if found && volumeMode != string(v1.PersistentVolumeFilesystem) {
+			logger.WithFields(logrus.Fields{
+				"namespace":  obj.GetNamespace(),
+				"name":       obj.GetName(),
+				"volumeMode": volumeMode,
+			}).Warn("PVC volumeMode other than Filesystem is not supported by transfer-pvc")
+		}
+
 		patches, err := removePVCFields(obj)
 		if err != nil {
 			return nil, err

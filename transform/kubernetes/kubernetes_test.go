@@ -59,7 +59,7 @@ func TestRun(t *testing.T) {
 			},
 		},
 		{
-			Name: "PVCFieldsCleanedAndStorageClassMapped",
+			Name: "BlockPVCFieldsCleanedAndStorageClassMapped",
 			Object: &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"kind":       "PersistentVolumeClaim",
@@ -76,7 +76,7 @@ func TestRun(t *testing.T) {
 					"spec": map[string]interface{}{
 						"accessModes":      []interface{}{"ReadWriteOnce"},
 						"storageClassName": "old-storage-class",
-						"volumeMode":       "Filesystem",
+						"volumeMode":       "Block",
 						"volumeName":       "pvc-source-id",
 					},
 				},
