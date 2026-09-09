@@ -27,6 +27,7 @@ func TestRun(t *testing.T) {
 		IncludeOnly          []schema.GroupKind
 		PVCStorageClassMap   map[string]string
 		WhiteoutPVC          bool
+		Extras               map[string]string
 		ShouldError          bool
 		Response             transform.PluginResponse
 		PatchResponseJson    string
@@ -57,6 +58,75 @@ func TestRun(t *testing.T) {
 				IsWhiteOut: true,
 				Version:    "v1",
 			},
+		},
+		{
+			Name: "PVCDeploymentDownscaled",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "Deployment",
+					"apiVersion": "apps/v1",
+					"metadata": map[string]interface{}{
+						"name": "app",
+					},
+					"spec": map[string]interface{}{
+						"replicas": int64(3),
+						"template": map[string]interface{}{
+							"spec": map[string]interface{}{
+								"volumes": []interface{}{map[string]interface{}{
+									"name": "data",
+									"persistentVolumeClaim": map[string]interface{}{
+										"claimName": "data",
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+			Extras:            map[string]string{kubernetes.DownscaleWorkloadsFlag: "true"},
+			Response:          transform.PluginResponse{IsWhiteOut: false, Version: "v1"},
+			PatchResponseJson: `[{"op":"add","path":"/metadata/annotations","value":{"crane.konveyor.io/original-replicas":"3"}},{"op":"replace","path":"/spec/replicas","value":0}]`,
+		},
+		{
+			Name: "PVCStatefulSetWithVolumeClaimTemplateDownscaled",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "StatefulSet",
+					"apiVersion": "apps/v1",
+					"metadata": map[string]interface{}{
+						"annotations": map[string]interface{}{"app": "database"},
+					},
+					"spec": map[string]interface{}{
+						"replicas": int64(2),
+						"volumeClaimTemplates": []interface{}{map[string]interface{}{
+							"metadata": map[string]interface{}{"name": "data"},
+							"spec":     map[string]interface{}{},
+						}},
+					},
+				},
+			},
+			Extras:            map[string]string{kubernetes.DownscaleWorkloadsFlag: "true"},
+			Response:          transform.PluginResponse{IsWhiteOut: false, Version: "v1"},
+			PatchResponseJson: `[{"op":"add","path":"/metadata/annotations/crane.konveyor.io~1original-replicas","value":"2"},{"op":"replace","path":"/spec/replicas","value":0}]`,
+		},
+		{
+			Name: "PVCPodWhiteoutWhenDownscaling",
+			Object: &unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"kind":       "Pod",
+					"apiVersion": "v1",
+					"spec": map[string]interface{}{
+						"volumes": []interface{}{map[string]interface{}{
+							"name": "data",
+							"persistentVolumeClaim": map[string]interface{}{
+								"claimName": "data",
+							},
+						}},
+					},
+				},
+			},
+			Extras:   map[string]string{kubernetes.DownscaleWorkloadsFlag: "true"},
+			Response: transform.PluginResponse{IsWhiteOut: true, Version: "v1"},
 		},
 		{
 			Name: "BlockPVCFieldsCleanedAndStorageClassMapped",
@@ -1273,7 +1343,7 @@ func TestRun(t *testing.T) {
 				PVCStorageClassMap:   c.PVCStorageClassMap,
 				WhiteoutPVC:          c.WhiteoutPVC,
 			}
-			resp, err := p.Run(transform.PluginRequest{Unstructured: *c.Object})
+			resp, err := p.Run(transform.PluginRequest{Unstructured: *c.Object, Extras: c.Extras})
 			if err != nil && !c.ShouldError {
 				t.Error(err)
 			}

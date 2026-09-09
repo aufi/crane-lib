@@ -37,7 +37,9 @@ const (
 	PVCRenameMap                 = "pvc-rename-map"
 	PVCStorageClassMap           = "pvc-storage-class-map"
 	WhiteoutPVCFlag              = "whiteout-pvc"
+	DownscaleWorkloadsFlag       = "downscale-workloads"
 	CraneJobIdempotentAnnotation = "crane.konveyor.io/job-idempotent"
+	OriginalReplicasAnnotation   = "crane.konveyor.io/original-replicas"
 )
 
 const (
@@ -145,6 +147,7 @@ type KubernetesTransformPlugin struct {
 	PVCRenameMap         map[string]string
 	PVCStorageClassMap   map[string]string
 	WhiteoutPVC          bool
+	DownscaleWorkloads   bool
 }
 
 func (k *KubernetesTransformPlugin) Run(request transform.PluginRequest) (transform.PluginResponse, error) {
@@ -227,6 +230,11 @@ func (k *KubernetesTransformPlugin) Metadata() transform.PluginMetadata {
 				Help:     "Whiteout PersistentVolumeClaims instead of including them in transformed output.",
 				Example:  "true",
 			},
+			{
+				FlagName: DownscaleWorkloadsFlag,
+				Help:     "Scale PVC-consuming workloads to zero and store their original replica count in annotations.",
+				Example:  "true",
+			},
 		},
 	}
 }
@@ -281,6 +289,9 @@ func (k *KubernetesTransformPlugin) setOptionalFields(extras map[string]string) 
 	if len(extras[WhiteoutPVCFlag]) > 0 {
 		k.WhiteoutPVC, _ = strconv.ParseBool(extras[WhiteoutPVCFlag])
 	}
+	if len(extras[DownscaleWorkloadsFlag]) > 0 {
+		k.DownscaleWorkloads, _ = strconv.ParseBool(extras[DownscaleWorkloadsFlag])
+	}
 	return nil
 }
 
@@ -306,6 +317,9 @@ var _ transform.Plugin = &KubernetesTransformPlugin{}
 func (k *KubernetesTransformPlugin) getWhiteOuts(obj unstructured.Unstructured) bool {
 	groupKind := obj.GroupVersionKind().GroupKind()
 	if k.WhiteoutPVC && groupKind == pvcGK {
+		return true
+	}
+	if k.DownscaleWorkloads && groupKind == podGK && hasPVCVolume(obj, "spec", "volumes") {
 		return true
 	}
 	if len(k.IncludeOnly) > 0 {
@@ -375,6 +389,89 @@ func groupKindInList(gk schema.GroupKind, list []schema.GroupKind) bool {
 	return false
 }
 
+func isScalableWorkload(groupKind schema.GroupKind) bool {
+	return groupKind == deploymentGK || groupKind == statefulSetGK || groupKind == replicaSetGK || groupKind == replicationControllerGK
+}
+
+func hasPVCVolume(obj unstructured.Unstructured, fields ...string) bool {
+	volumes, found, err := unstructured.NestedSlice(obj.Object, fields...)
+	if err != nil || !found {
+		return false
+	}
+	for _, volume := range volumes {
+		volumeMap, ok := volume.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, found, _ := unstructured.NestedMap(volumeMap, "persistentVolumeClaim"); found {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPVCWorkload(obj unstructured.Unstructured) bool {
+	if hasPVCVolume(obj, "spec", "template", "spec", "volumes") {
+		return true
+	}
+	if obj.GroupVersionKind().GroupKind() != statefulSetGK {
+		return false
+	}
+	volumeClaimTemplates, found, err := unstructured.NestedSlice(obj.Object, "spec", "volumeClaimTemplates")
+	return err == nil && found && len(volumeClaimTemplates) > 0
+}
+
+func downscaleWorkload(obj unstructured.Unstructured) (jsonpatch.Patch, error) {
+	replicas, found, err := unstructured.NestedInt64(obj.Object, "spec", "replicas")
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		replicas = 1
+	}
+	if replicas == 0 {
+		return nil, nil
+	}
+
+	annotations, annotationsFound, err := unstructured.NestedStringMap(obj.Object, "metadata", "annotations")
+	if err != nil {
+		return nil, err
+	}
+	annotationPath := "/metadata/annotations/" + escapeJSONPointer(OriginalReplicasAnnotation)
+	annotationOperation := "add"
+	annotationValue := interface{}(map[string]string{OriginalReplicasAnnotation: strconv.FormatInt(replicas, 10)})
+	if annotationsFound {
+		annotationValue = strconv.FormatInt(replicas, 10)
+		if _, found := annotations[OriginalReplicasAnnotation]; found {
+			annotationOperation = "replace"
+		}
+	} else {
+		annotationPath = "/metadata/annotations"
+	}
+
+	patches, err := valuePatch(annotationOperation, annotationPath, annotationValue)
+	if err != nil {
+		return nil, err
+	}
+	replicaOperation := "replace"
+	if !found {
+		replicaOperation = "add"
+	}
+	replicaPatch, err := valuePatch(replicaOperation, "/spec/replicas", 0)
+	if err != nil {
+		return nil, err
+	}
+	return append(patches, replicaPatch...), nil
+}
+
+func valuePatch(operation, path string, value interface{}) (jsonpatch.Patch, error) {
+	patchJSON, err := json.Marshal([]map[string]interface{}{{"op": operation, "path": path, "value": value}})
+	if err != nil {
+		return nil, err
+	}
+	return jsonpatch.DecodePatch(patchJSON)
+}
+
 func (k *KubernetesTransformPlugin) getKubernetesTransforms(obj unstructured.Unstructured) (jsonpatch.Patch, error) {
 	// Always attempt to add annotations for each thing.
 	jsonPatch := jsonpatch.Patch{}
@@ -392,6 +489,13 @@ func (k *KubernetesTransformPlugin) getKubernetesTransforms(obj unstructured.Uns
 	}
 	if len(k.RemoveAnnotations) > 0 {
 		patches, err := removeAnnotations(k.RemoveAnnotations)
+		if err != nil {
+			return nil, err
+		}
+		jsonPatch = append(jsonPatch, patches...)
+	}
+	if k.DownscaleWorkloads && isScalableWorkload(obj.GroupVersionKind().GroupKind()) && hasPVCWorkload(obj) {
+		patches, err := downscaleWorkload(obj)
 		if err != nil {
 			return nil, err
 		}
