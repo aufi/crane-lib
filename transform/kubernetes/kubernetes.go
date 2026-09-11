@@ -292,6 +292,16 @@ func (k *KubernetesTransformPlugin) setOptionalFields(extras map[string]string) 
 	if len(extras[DownscaleWorkloadsFlag]) > 0 {
 		k.DownscaleWorkloads, _ = strconv.ParseBool(extras[DownscaleWorkloadsFlag])
 	}
+	if k.DownscaleWorkloads {
+		if _, found := k.AddAnnotations[OriginalReplicasAnnotation]; found {
+			return fmt.Errorf("annotation %q is reserved by %s and cannot be set with %s", OriginalReplicasAnnotation, DownscaleWorkloadsFlag, AddAnnotationsFlag)
+		}
+		for _, annotation := range k.RemoveAnnotations {
+			if annotation == OriginalReplicasAnnotation {
+				return fmt.Errorf("annotation %q is reserved by %s and cannot be removed with %s", OriginalReplicasAnnotation, DownscaleWorkloadsFlag, RemoveAnnotationsFlag)
+			}
+		}
+	}
 	return nil
 }
 

@@ -3,6 +3,7 @@ package kubernetes_test
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	jsonpatch "github.com/evanphx/json-patch"
@@ -1435,4 +1436,44 @@ func TestPVCStorageClassMapOptional(t *testing.T) {
 			t.Fatal("expected PVC to be whiteouted when whiteout-pvc is true")
 		}
 	})
+}
+
+func TestDownscaleWorkloadsRejectsReservedAnnotationFlags(t *testing.T) {
+	obj := unstructured.Unstructured{Object: map[string]interface{}{
+		"kind":       "Deployment",
+		"apiVersion": "apps/v1",
+	}}
+
+	tests := []struct {
+		name   string
+		extras map[string]string
+	}{
+		{
+			name: "add reserved annotation",
+			extras: map[string]string{
+				kubernetes.DownscaleWorkloadsFlag: "true",
+				kubernetes.AddAnnotationsFlag:     kubernetes.OriginalReplicasAnnotation + "=3",
+			},
+		},
+		{
+			name: "remove reserved annotation",
+			extras: map[string]string{
+				kubernetes.DownscaleWorkloadsFlag: "true",
+				kubernetes.RemoveAnnotationsFlag:  kubernetes.OriginalReplicasAnnotation,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugin := &kubernetes.KubernetesTransformPlugin{}
+			_, err := plugin.Run(transform.PluginRequest{Unstructured: obj, Extras: tt.extras})
+			if err == nil {
+				t.Fatalf("expected %s conflict to fail", kubernetes.OriginalReplicasAnnotation)
+			}
+			if !strings.Contains(err.Error(), kubernetes.OriginalReplicasAnnotation) {
+				t.Fatalf("expected error to identify reserved annotation, got: %v", err)
+			}
+		})
+	}
 }
