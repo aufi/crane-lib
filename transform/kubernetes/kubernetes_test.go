@@ -1477,3 +1477,26 @@ func TestDownscaleWorkloadsRejectsReservedAnnotationFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestPVCBooleanOptionsRejectInvalidValues(t *testing.T) {
+	obj := unstructured.Unstructured{Object: map[string]interface{}{
+		"kind":       "PersistentVolumeClaim",
+		"apiVersion": "v1",
+	}}
+
+	for _, flag := range []string{kubernetes.WhiteoutPVCFlag, kubernetes.DownscaleWorkloadsFlag} {
+		t.Run(flag, func(t *testing.T) {
+			plugin := &kubernetes.KubernetesTransformPlugin{}
+			_, err := plugin.Run(transform.PluginRequest{
+				Unstructured: obj,
+				Extras:       map[string]string{flag: "treu"},
+			})
+			if err == nil {
+				t.Fatalf("expected invalid %s value to fail", flag)
+			}
+			if !strings.Contains(err.Error(), flag) {
+				t.Fatalf("expected error to identify %s, got: %v", flag, err)
+			}
+		})
+	}
+}

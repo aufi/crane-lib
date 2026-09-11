@@ -227,7 +227,7 @@ func (k *KubernetesTransformPlugin) Metadata() transform.PluginMetadata {
 			},
 			{
 				FlagName: WhiteoutPVCFlag,
-				Help:     "Whiteout PersistentVolumeClaims instead of including them in transformed output.",
+				Help:     "Whiteout PersistentVolumeClaims without owner references instead of including them in transformed output (PVCs with owner references are always whiteouted).",
 				Example:  "true",
 			},
 			{
@@ -286,11 +286,11 @@ func (k *KubernetesTransformPlugin) setOptionalFields(extras map[string]string) 
 		}
 		k.PVCStorageClassMap = storageClassMap
 	}
-	if len(extras[WhiteoutPVCFlag]) > 0 {
-		k.WhiteoutPVC, _ = strconv.ParseBool(extras[WhiteoutPVCFlag])
+	if err := setBoolFlag(extras, WhiteoutPVCFlag, &k.WhiteoutPVC); err != nil {
+		return err
 	}
-	if len(extras[DownscaleWorkloadsFlag]) > 0 {
-		k.DownscaleWorkloads, _ = strconv.ParseBool(extras[DownscaleWorkloadsFlag])
+	if err := setBoolFlag(extras, DownscaleWorkloadsFlag, &k.DownscaleWorkloads); err != nil {
+		return err
 	}
 	if k.DownscaleWorkloads {
 		if _, found := k.AddAnnotations[OriginalReplicasAnnotation]; found {
@@ -302,6 +302,19 @@ func (k *KubernetesTransformPlugin) setOptionalFields(extras map[string]string) 
 			}
 		}
 	}
+	return nil
+}
+
+func setBoolFlag(extras map[string]string, flagName string, destination *bool) error {
+	value, found := extras[flagName]
+	if !found || value == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("invalid %s value %q: %w", flagName, value, err)
+	}
+	*destination = parsed
 	return nil
 }
 
