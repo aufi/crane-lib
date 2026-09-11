@@ -750,6 +750,12 @@ func (k *KubernetesTransformPlugin) getKubernetesTransforms(obj unstructured.Uns
 			return nil, err
 		}
 		jsonPatch = append(jsonPatch, patches...)
+
+		patches, err = renamePVCManifest(obj, k.PVCRenameMap)
+		if err != nil {
+			return nil, err
+		}
+		jsonPatch = append(jsonPatch, patches...)
 	}
 	if serviceAccountGK == obj.GetObjectKind().GroupVersionKind().GroupKind() {
 		if _, found, _ := unstructured.NestedSlice(obj.Object, "secrets"); found {
@@ -920,6 +926,14 @@ func replacePVCStorageClass(obj unstructured.Unstructured, storageClassMap map[s
 		return nil, nil
 	}
 	return jsonpatch.DecodePatch([]byte(fmt.Sprintf(opReplace, pvcStorageClassName, replacement)))
+}
+
+func renamePVCManifest(obj unstructured.Unstructured, pvcRenameMap map[string]string) (jsonpatch.Patch, error) {
+	replacement, found := pvcRenameMap[obj.GetName()]
+	if !found {
+		return nil, nil
+	}
+	return valuePatch("replace", "/metadata/name", replacement)
 }
 
 func replacePVCStorageClasses(volumes []v1.PersistentVolumeClaim, storageClassMap map[string]string, path string) (jsonpatch.Patch, error) {

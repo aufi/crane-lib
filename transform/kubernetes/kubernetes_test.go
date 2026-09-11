@@ -1439,6 +1439,67 @@ func TestPVCStorageClassMapOptional(t *testing.T) {
 	})
 }
 
+func TestPVCRenameMapRenamesPVCManifestAndWorkloadReference(t *testing.T) {
+	pvc := unstructured.Unstructured{Object: map[string]interface{}{
+		"kind":       "PersistentVolumeClaim",
+		"apiVersion": "v1",
+		"metadata": map[string]interface{}{"name": "old"},
+	}}
+	workload := unstructured.Unstructured{Object: map[string]interface{}{
+		"kind":       "Deployment",
+		"apiVersion": "apps/v1",
+		"spec": map[string]interface{}{
+			"template": map[string]interface{}{
+				"spec": map[string]interface{}{
+					"volumes": []interface{}{map[string]interface{}{
+						"name": "data",
+						"persistentVolumeClaim": map[string]interface{}{
+							"claimName": "old",
+						},
+					}},
+				},
+			},
+		},
+	}}
+
+	plugin := &kubernetes.KubernetesTransformPlugin{}
+	for _, test := range []struct {
+		name     string
+		object   unstructured.Unstructured
+		expected string
+	}{
+		{
+			name:     "PVC manifest",
+			object:   pvc,
+			expected: `[{"op":"replace","path":"/metadata/name","value":"new"}]`,
+		},
+		{
+			name:     "workload reference",
+			object:   workload,
+			expected: `[{"op":"replace","path":"/spec/template/spec/volumes/0/persistentVolumeClaim/claimName","value":"new"}]`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response, err := plugin.Run(transform.PluginRequest{
+				Unstructured: test.object,
+				Extras: map[string]string{
+					kubernetes.PVCRenameMap: "old:new",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := jsonpatch.DecodePatch([]byte(test.expected))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if equal, err := internaljsonpatch.Equal(response.Patches, expected); err != nil || !equal {
+				t.Fatalf("unexpected patches: %v", response.Patches)
+			}
+		})
+	}
+}
+
 func TestDownscaleWorkloadsPreservesAddedAnnotations(t *testing.T) {
 	workload := unstructured.Unstructured{Object: map[string]interface{}{
 		"kind":       "Deployment",
