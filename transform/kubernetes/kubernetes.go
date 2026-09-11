@@ -444,7 +444,7 @@ func hasPVCWorkload(obj unstructured.Unstructured) bool {
 	return err == nil && found && len(volumeClaimTemplates) > 0
 }
 
-func downscaleWorkload(obj unstructured.Unstructured) (jsonpatch.Patch, error) {
+func downscaleWorkload(obj unstructured.Unstructured, addedAnnotations map[string]string) (jsonpatch.Patch, error) {
 	replicas, found, err := unstructured.NestedInt64(obj.Object, "spec", "replicas")
 	if err != nil {
 		return nil, err
@@ -470,6 +470,10 @@ func downscaleWorkload(obj unstructured.Unstructured) (jsonpatch.Patch, error) {
 		}
 	} else {
 		annotationPath = "/metadata/annotations"
+		annotations := annotationValue.(map[string]string)
+		for key, value := range addedAnnotations {
+			annotations[key] = value
+		}
 	}
 
 	patches, err := valuePatch(annotationOperation, annotationPath, annotationValue)
@@ -484,7 +488,15 @@ func downscaleWorkload(obj unstructured.Unstructured) (jsonpatch.Patch, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(patches, replicaPatch...), nil
+	patches = append(patches, replicaPatch...)
+	if annotationsFound && len(addedAnnotations) > 0 {
+		annotationPatches, err := addAnnotations(addedAnnotations)
+		if err != nil {
+			return nil, err
+		}
+		patches = append(patches, annotationPatches...)
+	}
+	return patches, nil
 }
 
 func valuePatch(operation, path string, value interface{}) (jsonpatch.Patch, error) {
@@ -503,7 +515,8 @@ func (k *KubernetesTransformPlugin) getKubernetesTransforms(obj unstructured.Uns
 		return nil, err
 	}
 	jsonPatch = append(jsonPatch, patches...)
-	if k.AddAnnotations != nil && len(k.AddAnnotations) > 0 {
+	shouldDownscaleWorkload := k.DownscaleWorkloads && isScalableWorkload(obj.GroupVersionKind().GroupKind()) && hasPVCWorkload(obj)
+	if !shouldDownscaleWorkload && k.AddAnnotations != nil && len(k.AddAnnotations) > 0 {
 		patches, err := addAnnotations(k.AddAnnotations)
 		if err != nil {
 			return nil, err
@@ -517,8 +530,8 @@ func (k *KubernetesTransformPlugin) getKubernetesTransforms(obj unstructured.Uns
 		}
 		jsonPatch = append(jsonPatch, patches...)
 	}
-	if k.DownscaleWorkloads && isScalableWorkload(obj.GroupVersionKind().GroupKind()) && hasPVCWorkload(obj) {
-		patches, err := downscaleWorkload(obj)
+	if shouldDownscaleWorkload {
+		patches, err := downscaleWorkload(obj, k.AddAnnotations)
 		if err != nil {
 			return nil, err
 		}

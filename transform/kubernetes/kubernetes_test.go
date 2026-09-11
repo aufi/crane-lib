@@ -84,9 +84,10 @@ func TestRun(t *testing.T) {
 					},
 				},
 			},
+			AddAnnotations:     map[string]string{"team": "ops"},
 			Extras:            map[string]string{kubernetes.DownscaleWorkloadsFlag: "true"},
 			Response:          transform.PluginResponse{IsWhiteOut: false, Version: "v1"},
-			PatchResponseJson: `[{"op":"add","path":"/metadata/annotations","value":{"crane.konveyor.io/original-replicas":"3"}},{"op":"replace","path":"/spec/replicas","value":0}]`,
+			PatchResponseJson: `[{"op":"add","path":"/metadata/annotations","value":{"crane.konveyor.io/original-replicas":"3","team":"ops"}},{"op":"replace","path":"/spec/replicas","value":0}]`,
 		},
 		{
 			Name: "PVCStatefulSetWithVolumeClaimTemplateDownscaled",
@@ -1436,6 +1437,61 @@ func TestPVCStorageClassMapOptional(t *testing.T) {
 			t.Fatal("expected PVC to be whiteouted when whiteout-pvc is true")
 		}
 	})
+}
+
+func TestDownscaleWorkloadsPreservesAddedAnnotations(t *testing.T) {
+	workload := unstructured.Unstructured{Object: map[string]interface{}{
+		"kind":       "Deployment",
+		"apiVersion": "apps/v1",
+		"metadata": map[string]interface{}{
+			"name": "app",
+		},
+		"spec": map[string]interface{}{
+			"replicas": int64(3),
+			"template": map[string]interface{}{
+				"spec": map[string]interface{}{
+					"volumes": []interface{}{map[string]interface{}{
+						"name": "data",
+						"persistentVolumeClaim": map[string]interface{}{
+							"claimName": "data",
+						},
+					}},
+				},
+			},
+		},
+	}}
+	runner := transform.NewRunner(nil, nil, map[string]string{
+		kubernetes.DownscaleWorkloadsFlag: "true",
+		kubernetes.AddAnnotationsFlag:     "team=ops",
+	})
+	plugin := &kubernetes.KubernetesTransformPlugin{}
+	original, err := workload.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 100; i++ {
+		response, err := runner.Run(workload, []transform.Plugin{plugin})
+		if err != nil {
+			t.Fatal(err)
+		}
+		patch, err := jsonpatch.DecodePatch(response.TransformFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transformed, err := patch.Apply(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result unstructured.Unstructured
+		if err := result.UnmarshalJSON(transformed); err != nil {
+			t.Fatal(err)
+		}
+		annotations := result.GetAnnotations()
+		if annotations["team"] != "ops" || annotations[kubernetes.OriginalReplicasAnnotation] != "3" {
+			t.Fatalf("annotations were not preserved: %v", annotations)
+		}
+	}
 }
 
 func TestDownscaleWorkloadsRejectsReservedAnnotationFlags(t *testing.T) {
